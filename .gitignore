@@ -1,0 +1,15 @@
+# .gitignore
+
+# Virtuelle Umgebung
+.venv/
+
+# Umgebungsvariablen‐Datei
+.env
+
+# Python‐Cache-Dateien
+__pycache__/
+*.py[cod]
+*.pyo
+
+# VS Code
+.vscode/
