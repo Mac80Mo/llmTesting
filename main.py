@@ -1,90 +1,178 @@
 import os
+import time
+import pandas as pd
 from dotenv import load_dotenv
 
-# --------------------------------------------------------
-# 1) .env einlesen
-#    - Die Datei ".env" muss sich im selben Verzeichnis wie main.py befinden.
-#    - In .env steht genau:
-#        HUGGINGFACEHUB_API_TOKEN=hf_<dein_token>
-# --------------------------------------------------------
-load_dotenv()  # Liest Umgebungsvariablen aus der Datei .env
-
-# --------------------------------------------------------
-# 2) Token aus Umgebungsvariablen auslesen
-# --------------------------------------------------------
-hf_token = os.getenv("HUGGINGFACEHUB_API_TOKEN")
-if not hf_token:
-    # Abbrechen, falls kein Token gesetzt ist
-    raise ValueError(
-        "♨️ Kein Token gefunden. Bitte lege eine Datei '.env' an mit:\n"
-        "   HUGGINGFACEHUB_API_TOKEN=hf_<dein_token>"
-    )
-
-# --------------------------------------------------------
-# 3) Wichtige Importe für LangChain
-#    - HuggingFaceEndpoint: für die Verbindung zum Hugging Face Inference-API
-#    - LLMChain und PromptTemplate: für einfache Prompt-Workflows
-# --------------------------------------------------------
+from transformers import AutoTokenizer
 from langchain_huggingface import HuggingFaceEndpoint
 from langchain.chains import LLMChain
 from langchain_core.prompts import PromptTemplate
 
 # --------------------------------------------------------
-# 4) LLM-Instanz erstellen
-#
-#    Wir verwenden hier das Modell "HuggingFaceH4/zephyr-7b-beta", da es als
-#    text-generation-Inference-Endpoint verfügbar ist.
-#
-#    Parameter:
-#      - repo_id="HuggingFaceH4/zephyr-7b-beta"  
-#          • exakte Modellbezeichnung auf Hugging Face  
-#      - huggingfacehub_api_token=hf_token          
-#          • Übergibt deinen API-Key für die Autorisierung  
-#      - provider="auto"                            
-#          • LangChain wählt automatisch den passenden Inference-Provider  
-#      - task="text-generation"                     
-#          • Pipeline-Typ: Causal Language Model (Text-Generierung)  
-#      - temperature=0.7                             
-#          • Steuert die Kreativität (0.0 bis 1.0)  
-#      - max_new_tokens=100                          
-#          • Maximale Anzahl neu generierter Tokens pro Anfrage  
+# 1) .env einlesen
+#    - Die Datei ".env" muss im selben Verzeichnis wie main.py liegen.
+#    - In .env steht exakt:
+#        HUGGINGFACEHUB_API_TOKEN=hf_<dein_token>
 # --------------------------------------------------------
-llm = HuggingFaceEndpoint(
-    repo_id="HuggingFaceH4/zephyr-7b-beta",
-    huggingfacehub_api_token=hf_token,
-    provider="auto",
-    task="text-generation",
-    temperature=0.7,
-    max_new_tokens=50,
-    stop=["\nFrage:"]
-)
+load_dotenv()
+hf_token = os.getenv("HUGGINGFACEHUB_API_TOKEN")
+if not hf_token:
+    raise ValueError(
+        "♨️ Kein Token gefunden. Lege eine `.env`-Datei an mit:\n"
+        "   HUGGINGFACEHUB_API_TOKEN=hf_<dein_token>"
+    )
 
 # --------------------------------------------------------
-# 5) Direkter Prompt-Abruf (ohne Chain)
+# 2) Modell‐ID & Tokenizer initialisieren
+#    - Wir nutzen dasselbe Modell wie zuvor: HuggingFaceH4/zephyr-7b-beta
 # --------------------------------------------------------
-#prompt_text = "Erkläre den Dopplereffekt in einfachen Worten."
-# Mit .invoke(prompt) rufen wir das Modell auf und erhalten die generierte Antwort
-#response = llm.invoke(prompt_text)
+MODEL_ID = "HuggingFaceH4/zephyr-7b-beta"
+tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
 
-#print("=== Direkte LLM-Antwort ===")
-#print(response)
+def count_tokens(text: str) -> int:
+    """
+    Zählt, wie viele Tokens im übergebenen Text durch den HF‐Tokenizer erzeugt werden.
+    """
+    return len(tokenizer.encode(text, add_special_tokens=True))
+
 
 # --------------------------------------------------------
-# 6) LLMChain mit PromptTemplate
-#
-#    Wir bauen eine einfache Prompt-Vorlage, die später mit einer Variable {frage}
-#    gefüllt wird. LLMChain verbindet das LLM und das Template zu einem Workflow.
+# 3) Funktion: LLM-Aufruf mit Latenz‐ und Token‐Messung
+# --------------------------------------------------------
+def measure_llm(
+    llm: HuggingFaceEndpoint,
+    prompt: str,
+    stop_sequences: list[str] = None
+) -> dict:
+    """
+    Führt einen LLM-Aufruf aus und misst dabei:
+      - die Antwortzeit (Latenz) in Sekunden
+      - die Anzahl der Input- und Output-Tokens
+
+    Parameter:
+      - llm: die HuggingFaceEndpoint-Instanz
+      - prompt: der fertige Prompt-String
+      - stop_sequences: Liste von Stoppsequenzen (optional)
+
+    Rückgabe:
+      {
+        "latency": float,        # gemessene Zeit in Sekunden
+        "input_tokens": int,     # Anzahl der Tokens im Prompt
+        "output_tokens": int,    # Anzahl der Tokens in der generierten Antwort
+        "response_text": str     # der eigentliche generierte Text
+      }
+    """
+    # Anzahl der Tokens im Prompt zählen
+    n_input_tokens = count_tokens(prompt)
+
+    # Stop-Parameter anfügen, falls vorhanden
+    invocation_kwargs = {}
+    if stop_sequences:
+        invocation_kwargs["stop"] = stop_sequences
+
+    # Latenz messen
+    start = time.time()
+    response = llm.invoke(prompt, **invocation_kwargs)
+    latency = time.time() - start
+
+    generated_text = response
+    # Anzahl der Tokens in der Antwort zählen
+    n_output_tokens = count_tokens(generated_text)
+
+    return {
+        "latency": latency,
+        "input_tokens": n_input_tokens,
+        "output_tokens": n_output_tokens,
+        "response_text": generated_text
+    }
+
+
+# --------------------------------------------------------
+# 4) PromptTemplate und LLMChain definieren
+#    - Mit zusätzlicher Instruktion für eine einzelne, sachliche Antwort auf Deutsch
 # --------------------------------------------------------
 template = PromptTemplate(
-    template="Frage: {frage}\nAntwort:",
+    template=(
+        "Gib in einem einzigen, klaren Satz und auf Deutsch eine sachliche Antwort.\n"
+        "Frage: {frage}\n"
+        "Antwort:"
+    ),
     input_variables=["frage"]
 )
-chain = LLMChain(llm=llm, prompt=template)
 
-# Beispiel-Eingabe für die Chain
+# --------------------------------------------------------
+# 5) Parameter‐Sets vorbereiten
+#    - Jede Kombination aus temperature und max_new_tokens testen
+#    - Hinweis: temperature muss strikt positiv sein, daher kein 0.0
+# --------------------------------------------------------
+parameter_list = [
+    {"temperature": 0.1, "max_new_tokens": 50},
+    {"temperature": 0.1, "max_new_tokens": 100},
+    {"temperature": 0.3, "max_new_tokens": 50},
+    {"temperature": 0.3, "max_new_tokens": 100},
+    {"temperature": 0.7, "max_new_tokens": 50},
+    {"temperature": 0.7, "max_new_tokens": 100},
+]
+
+# --------------------------------------------------------
+# 6) Messergebnisse sammeln
+# --------------------------------------------------------
+results = []
 frage = "Warum ist der Himmel blau?"
-# Mit .invoke({"frage": frage}) setzen wir den Wert für {frage} ein und führen die Anfrage aus
-ausgabe = chain.invoke({"frage": frage})
+prompt_string = template.format(frage=frage)
 
-print("\n=== LLMChain-Antwort ===")
-print(ausgabe)
+for params in parameter_list:
+    # --------------------------------------------------------
+    # 6.1) LLM-Instanz erstellen (HuggingFaceEndpoint) mit den jeweiligen Parametern
+    #    - stop=["\nFrage:", "\nQuestion:"] sorgt dafür, dass das Modell stoppt,
+    #      sobald es eine neue "Frage:" oder "Question:" generieren will
+    # --------------------------------------------------------
+    llm = HuggingFaceEndpoint(
+        repo_id=MODEL_ID,
+        huggingfacehub_api_token=hf_token,
+        provider="auto",
+        task="text-generation",
+        temperature=params["temperature"],
+        max_new_tokens=params["max_new_tokens"],
+        stop=["\nFrage:", "\nQuestion:"]
+    )
+
+    # --------------------------------------------------------
+    # 6.2) LLM-Aufruf + Messung
+    # --------------------------------------------------------
+    measurement = measure_llm(
+        llm=llm,
+        prompt=prompt_string,
+        stop_sequences=["\nFrage:", "\nQuestion:"]
+    )
+
+    # --------------------------------------------------------
+    # 6.3) Messergebnis protokollieren
+    # --------------------------------------------------------
+    results.append({
+        "temperature": params["temperature"],
+        "max_new_tokens": params["max_new_tokens"],
+        "latency_sec": round(measurement["latency"], 3),
+        "input_tokens": measurement["input_tokens"],
+        "output_tokens": measurement["output_tokens"],
+        "response_text": measurement["response_text"]
+    })
+
+# --------------------------------------------------------
+# 7) Ergebnisse in DataFrame umwandeln und ausgeben
+# --------------------------------------------------------
+df = pd.DataFrame(results)
+
+print("\n=== Messergebnisse als Tabelle ===")
+# Tabelle ohne tabulate-Dependency ausgeben
+print(
+    df[["temperature", "max_new_tokens", "latency_sec", "input_tokens", "output_tokens"]]
+    .to_string(index=False)
+)
+
+# --------------------------------------------------------
+# 8) Detaillierte Ausgabe der vollständigen Antworten
+# --------------------------------------------------------
+for row in results:
+    print(f"\n--- Parameter-Set: temp={row['temperature']}, max_new_tokens={row['max_new_tokens']} ---")
+    print("Antwort:", row["response_text"])
